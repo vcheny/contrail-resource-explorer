@@ -1,0 +1,167 @@
+#! /usr/bin/env python
+# PYTHON_ARGCOMPLETE_OK
+from vnc_api.gen import resource_common as res
+import inspect
+import pygraphviz as pgv
+import argparse
+
+class ResourceExp ():
+    def __init__(self):
+        self._resource_object_map = {}
+        self.resrouce_init()
+        self._args = None
+        self.parse_args()
+        self._G = None
+        self.digram_init()
+        self._node_set = set([])
+        self._ref_node_set = set([])
+        self._fields = ['prop_fields', 'ref_fields', 'backref_fields',
+                     'parent_types', 'children_fields']
+
+    def parse_args(self):
+        parser = argparse.ArgumentParser(prog='rexp',
+                description='A script to visualize the relationship between '
+                            'each object type in Contrail')
+        parser.add_argument('-c', '--parent_child_depth', type= int,
+                            default= 0, help='Define parent-children depth')
+        parser.add_argument('-r', '--reference_depth', type= int,
+                            default= 0, help='Define ref-backref depth')
+        parser.add_argument('-d', '--detail', action="store_true",
+                            help='Show resrouce details including '
+                                 'properties and references')
+        parser.add_argument('name', nargs='+',
+                            choices=self._resource_object_map.keys(),
+                            help='Resource type name')
+        parser.add_argument('-f', '--filename', default='rexp_out',
+                            help="Output filename, default='%(default)s'")
+        parser.add_argument('-p', '--prog', default='dot',
+                            choices=['dot', 'neato', 'fdp', 'twopi', 'circo'],
+                            help="Layout engine, default='%(default)s'")
+        parser.add_argument('--draw', choices=['pdf', 'png'],
+                            help="Output format")
+        try:
+            import argcomplete
+            argcomplete.autocomplete(parser)
+        except:
+            pass
+        self._args = parser.parse_args()
+        return 0
+
+    def digram_init(self):
+        self._G = pgv.AGraph(directed=True)
+        self._G.node_attr['shape']= 'record'
+
+    def resrouce_init(self):
+        for class_name, obj in inspect.getmembers(res, inspect.isclass):
+            resource_type = "res.%s.resource_type" % (class_name)
+            resource_type = ''.join(eval(resource_type))
+            self._resource_object_map[resource_type] = class_name
+
+    def add_node(self, resource_type):
+        self._G.add_node(resource_type)
+        node=self._G.get_node(resource_type)
+
+        label = '{%s' % (resource_type)
+
+        if self._args.detail:
+            label += '|'
+            class_name = self._resource_object_map[resource_type]
+            for field in self._fields:
+                fileds_value = eval("res.%s.%s" % (class_name, field))
+                prefix = field.split('_')[0].upper()
+                if len(fileds_value):
+                    label += ('%s:\l\t+%s\l' %
+                              (prefix, '\l\t+'.join(sorted(fileds_value))))
+
+        node.attr['label'] = '%s}' % (label)
+
+    def add_edge(self, from_resource, to_resource, is_ref):
+        if not self._G.has_node(from_resource):
+            self.add_node(from_resource)
+
+        if not self._G.has_node(to_resource):
+            self.add_node(to_resource)
+
+        if is_ref:
+            self._G.add_edge(from_resource, to_resource,
+                             color='blue', dir="both",
+                             arrowhead = "empty", arrowtail="invempty")
+        else:
+            self._G.add_edge(from_resource, to_resource, color='red')
+
+    def draw_node_edge(self, resource, depth):
+        if resource not in self._node_set:
+            self._node_set.add(resource)
+            if not self._G.has_node(resource):
+                self.add_node(resource)
+        else:
+            return 0
+
+        if depth == 0: return 0
+
+        class_name = self._resource_object_map[resource]
+
+        parent_types = "res.%s.parent_types" % (class_name)
+        for parent in eval(parent_types):
+            self.add_edge( parent, resource, False)
+            if depth: self.draw_node_edge(parent, depth-1)
+
+        children_fields = "res.%s.children_fields" % (class_name)
+        for child in eval(children_fields):
+            child_type = child.replace('_', '-')[:-1]
+            self.add_edge( resource, child_type, False)
+            if depth: self.draw_node_edge(child_type, depth-1)
+
+    def draw_node_edge_ref(self, resource, depth):
+        if resource not in self._ref_node_set:
+            self._ref_node_set.add(resource)
+            if not self._G.has_node(resource):
+                self.add_node(resource)
+        else:
+            return 0
+
+        if depth == 0: return 0
+
+        class_name = self._resource_object_map[resource]
+
+        ref_fields = "res.%s.ref_fields" % (class_name)
+        for ref in eval(ref_fields):
+            ref_type = '-'.join(ref.split('_')[:-1])
+            self.add_edge( resource, ref_type, True)
+            if depth: self.draw_node_edge_ref(ref_type, depth-1)
+
+        backref_fields = "res.%s.backref_fields" % (class_name)
+        for backref in eval(backref_fields):
+            backref_type = '-'.join(backref.split('_')[:-2])
+            self.add_edge( backref_type, resource, True)
+            if depth: self.draw_node_edge_ref(backref_type, depth-1)
+
+    def print_resource(self, resource):
+         class_name = self._resource_object_map[resource]
+
+         print "RESOURCE_TYPE: "
+         print "  " + resource
+         for field in self._fields:
+             field_value = "res.%s.%s" % (class_name, field)
+             print "%s: " % (field.upper())
+             field_value_list = [str(e) for e in eval(field_value)]
+             if len(field_value_list):
+                 print "  %s" % ("\n  ".join(field_value_list))
+
+    def run(self):
+        resource_name = ''.join(self._args.name)
+        self.print_resource(resource_name)
+        if self._args.draw:
+            self.draw_node_edge(resource_name, self._args.parent_child_depth)
+            self.draw_node_edge_ref(resource_name, self._args.reference_depth)
+            print self._G.string()
+            self._G.draw(self._args.filename + '.' + self._args.draw,
+                         prog=self._args.prog, format=self._args.draw)
+
+def main():
+    rexp = ResourceExp()
+    rexp.run()
+# end main
+
+if __name__ == "__main__":
+    main()
